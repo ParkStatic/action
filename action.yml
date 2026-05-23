@@ -1,0 +1,117 @@
+name: Parkstatic Build and Deploy
+description: Build a Lovable TanStack Start static site and deploy to Parkstatic.
+author: ParkStatic
+
+branding:
+  icon: upload-cloud
+  color: green
+
+inputs:
+  parkstatic-secret:
+    description: Parkstatic instance secret token (store as a repository secret).
+    required: true
+  node-version:
+    description: Node.js version used for the build.
+    required: false
+    default: "22"
+  pnpm-version:
+    description: pnpm version used for the build.
+    required: false
+    default: "10"
+
+outputs:
+  deploy-url:
+    description: Resolved deploy webhook URL, if deploy ran.
+    value: ${{ steps.deploy.outputs.url }}
+  deployed:
+    description: Whether dist.zip was posted to the deploy webhook.
+    value: ${{ steps.deploy.outputs.deployed }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v5
+
+    - uses: pnpm/action-setup@v4
+      with:
+        version: ${{ inputs.pnpm-version }}
+
+    - uses: actions/setup-node@v5
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+
+    - name: Fix TanStack hoisting for Lovable + pnpm
+      shell: bash
+      run: echo 'public-hoist-pattern[]=@tanstack/query-core' >> .npmrc
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Write CI Vite config (prerender static site)
+      shell: bash
+      run: |
+        cat > vite.config.ci.ts << 'EOF'
+        import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+
+        export default defineConfig({
+          // Cloudflare plugin outputs dist/server/index.js; prerender needs server.js
+          cloudflare: false,
+          tanstackStart: {
+            server: { entry: "server" },
+            prerender: {
+              enabled: true,
+              autoStaticPathsDiscovery: true,
+              crawlLinks: true,
+            },
+          },
+        });
+        EOF
+
+    - name: Build
+      shell: bash
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      run: pnpm exec vite build --config vite.config.ci.ts
+
+    - name: Package static site
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf static-site dist.zip
+        cp -a dist/client/. static-site/
+        (cd static-site && zip -qr ../dist.zip .)
+
+    - name: Deploy to Parkstatic
+      id: deploy
+      shell: bash
+      env:
+        PARKSTATIC_SECRET: ${{ inputs.parkstatic-secret }}
+        GH_SHA: ${{ github.sha }}
+        GH_REF: ${{ github.ref }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+
+        if ! RESP=$(curl -sf -X POST "https://jbunbxkodmsysnfptqoj.supabase.co/functions/v1/get-instance-url" \
+          -H "Authorization: Bearer $PARKSTATIC_SECRET"); then
+          echo "::error::Failed to resolve Parkstatic deploy URL. Check that parkstatic-secret is valid."
+          exit 1
+        fi
+
+        WEBHOOK_URL=$(echo "$RESP" | jq -er '.url')
+        echo "url=$WEBHOOK_URL" >> "$GITHUB_OUTPUT"
+        echo "Resolved deploy URL."
+
+        if ! curl -sf -X POST "$WEBHOOK_URL" \
+          -F "file=@dist.zip;type=application/zip" \
+          -F "sha=${GH_SHA}" \
+          -F "ref=${GH_REF}" \
+          -F "repository=${GH_REPO}"; then
+          echo "::error::Failed to upload dist.zip to Parkstatic."
+          exit 1
+        fi
+
+        echo "Posted dist.zip to deploy webhook."
+        echo "deployed=true" >> "$GITHUB_OUTPUT"
