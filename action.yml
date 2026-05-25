@@ -1,5 +1,5 @@
 name: Parkstatic Build and Deploy
-description: Build a Lovable TanStack Start static site and deploy to Parkstatic.
+description: Build any Lovable project into a static site and deploy to Parkstatic.
 author: ParkStatic
 
 branding:
@@ -18,6 +18,14 @@ inputs:
     description: pnpm version used for the build.
     required: false
     default: "10"
+  build-command:
+    description: Override the build command (skips auto-detection).
+    required: false
+    default: ""
+  output-dir:
+    description: Override the static output directory (skips auto-detection).
+    required: false
+    default: ""
 
 outputs:
   deploy-url:
@@ -32,49 +40,139 @@ runs:
   steps:
     - uses: actions/checkout@v5
 
+    - name: Detect package manager
+      id: pm
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f pnpm-lock.yaml ]; then
+          echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+          echo "lockfile=true" >> "$GITHUB_OUTPUT"
+        elif [ -f package-lock.json ]; then
+          echo "manager=npm" >> "$GITHUB_OUTPUT"
+          echo "lockfile=true" >> "$GITHUB_OUTPUT"
+        elif [ -f yarn.lock ]; then
+          echo "manager=yarn" >> "$GITHUB_OUTPUT"
+          echo "lockfile=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+          echo "lockfile=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::No lockfile found; using pnpm without frozen lockfile."
+        fi
+
+    - name: Detect Lovable project type
+      id: project
+      shell: bash
+      run: |
+        set -euo pipefail
+        if grep -Eq '"@lovable\.dev/vite-tanstack-config"' package.json; then
+          echo "type=tanstack-start" >> "$GITHUB_OUTPUT"
+          echo "Detected TanStack Start project."
+        elif grep -Eq '"vite"' package.json; then
+          echo "type=vite-spa" >> "$GITHUB_OUTPUT"
+          echo "Detected Vite SPA project."
+        else
+          echo "::error::Unsupported project: expected @lovable.dev/vite-tanstack-config or vite in package.json."
+          exit 1
+        fi
+
     - uses: pnpm/action-setup@v4
+      if: steps.pm.outputs.manager == 'pnpm'
       with:
         version: ${{ inputs.pnpm-version }}
 
-    - name: Detect pnpm lockfile
-      id: lockfile
-      shell: bash
-      run: |
-        if [ -f pnpm-lock.yaml ]; then
-          echo "exists=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-          echo "::notice::pnpm-lock.yaml not found; skipping dependency cache and installing without --frozen-lockfile."
-        fi
-
     - uses: actions/setup-node@v5
-      if: steps.lockfile.outputs.exists == 'true'
+      if: steps.pm.outputs.lockfile == 'true' && steps.pm.outputs.manager == 'pnpm'
       with:
         node-version: ${{ inputs.node-version }}
         cache: pnpm
 
     - uses: actions/setup-node@v5
-      if: steps.lockfile.outputs.exists != 'true'
+      if: steps.pm.outputs.lockfile == 'true' && steps.pm.outputs.manager == 'npm'
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - uses: actions/setup-node@v5
+      if: steps.pm.outputs.lockfile == 'true' && steps.pm.outputs.manager == 'yarn'
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: yarn
+
+    - uses: actions/setup-node@v5
+      if: steps.pm.outputs.lockfile != 'true'
       with:
         node-version: ${{ inputs.node-version }}
 
-    - name: Fix TanStack hoisting for Lovable + pnpm
+    - name: Configure package manager
       shell: bash
-      run: echo 'public-hoist-pattern[]=@tanstack/query-core' >> .npmrc
+      run: |
+        set -euo pipefail
+        if [ "${{ steps.pm.outputs.manager }}" != "pnpm" ]; then
+          exit 0
+        fi
+        {
+          echo 'onlyBuiltDependencies[]=esbuild'
+          echo 'onlyBuiltDependencies[]=@swc/core'
+        } >> .npmrc
+        if [ "${{ steps.project.outputs.type }}" = "tanstack-start" ]; then
+          echo 'public-hoist-pattern[]=@tanstack/query-core' >> .npmrc
+        fi
 
     - name: Install dependencies
       shell: bash
       run: |
-        if [ "${{ steps.lockfile.outputs.exists }}" = "true" ]; then
-          pnpm install --frozen-lockfile
-        else
-          pnpm install
+        set -euo pipefail
+        case "${{ steps.pm.outputs.manager }}" in
+          pnpm)
+            if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install
+            fi
+            ;;
+          npm)
+            if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
+              npm ci
+            else
+              npm install
+            fi
+            ;;
+          yarn)
+            if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
+              yarn install --frozen-lockfile
+            else
+              yarn install
+            fi
+            ;;
+        esac
+
+    - name: Build
+      shell: bash
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        PROJECT_TYPE: ${{ steps.project.outputs.type }}
+        PACKAGE_MANAGER: ${{ steps.pm.outputs.manager }}
+      run: |
+        set -euo pipefail
+
+        run_pm() {
+          case "$PACKAGE_MANAGER" in
+            pnpm) pnpm "$@" ;;
+            npm) npm "$@" ;;
+            yarn) yarn "$@" ;;
+          esac
+        }
+
+        if [ -n "$BUILD_COMMAND" ]; then
+          echo "Running custom build command."
+          eval "$BUILD_COMMAND"
+          exit 0
         fi
 
-    - name: Write CI Vite config (prerender static site)
-      shell: bash
-      run: |
-        cat > vite.config.ci.ts << 'EOF'
+        if [ "$PROJECT_TYPE" = "tanstack-start" ]; then
+          cat > vite.config.ci.ts << 'EOF'
         import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
         export default defineConfig({
@@ -90,19 +188,36 @@ runs:
           },
         });
         EOF
-
-    - name: Build
-      shell: bash
-      env:
-        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      run: pnpm exec vite build --config vite.config.ci.ts
+          echo "Building TanStack Start with prerender config."
+          run_pm exec vite build --config vite.config.ci.ts
+        else
+          echo "Building Vite SPA with project build script."
+          run_pm run build
+        fi
 
     - name: Package static site
       shell: bash
       run: |
         set -euo pipefail
         rm -rf static-site dist.zip
-        cp -a dist/client/. static-site/
+
+        OUTPUT_DIR="${{ inputs.output-dir }}"
+        if [ -z "$OUTPUT_DIR" ]; then
+          for candidate in dist/client dist build; do
+            if [ -f "$candidate/index.html" ]; then
+              OUTPUT_DIR="$candidate"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$OUTPUT_DIR" ] || [ ! -f "$OUTPUT_DIR/index.html" ]; then
+          echo "::error::Could not find static output (expected index.html in dist/client, dist, or build)."
+          exit 1
+        fi
+
+        echo "Packaging static site from $OUTPUT_DIR."
+        cp -a "$OUTPUT_DIR/." static-site/
         (cd static-site && zip -qr ../dist.zip .)
 
     - name: Deploy to Parkstatic
