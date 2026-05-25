@@ -13,7 +13,7 @@ http_post "$RESOLVE_URL" -H "Authorization: Bearer $PARKSTATIC_SECRET"
 
 if [ "$HTTP_STATUS" != "200" ]; then
   action_error "Failed to resolve Parkstatic deploy URL (HTTP $HTTP_STATUS): $HTTP_BODY"
-  if echo "$HTTP_BODY" | grep -q 'Missing/invalid uuid'; then
+  if echo "$HTTP_BODY" | grep -q 'Missing/invalid authorization'; then
     action_error "The get-instance-url Supabase function may not be deployed. Run: supabase functions deploy get-instance-url"
   elif [ "$HTTP_STATUS" = "401" ]; then
     action_error "Check that parkstatic-secret matches the token shown in your Parkstatic WordPress admin."
@@ -29,6 +29,7 @@ echo "Resolved deploy URL."
 echo "WEBHOOK_URL: $WEBHOOK_URL"
 
 http_post "$WEBHOOK_URL" \
+  -H "Authorization: Bearer $PARKSTATIC_SECRET" \
   -F "file=@dist.zip;type=application/zip" \
   -F "sha=${GH_SHA}" \
   -F "ref=${GH_REF}" \
