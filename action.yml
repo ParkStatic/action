@@ -45,15 +45,28 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        if [ -f pnpm-lock.yaml ]; then
+        PM_FIELD=""
+        if grep -q '"packageManager"' package.json; then
+          PM_FIELD=$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"\([^@"]*\).*/\1/p' package.json | head -1)
+        fi
+
+        if [ -n "$PM_FIELD" ]; then
+          echo "manager=$PM_FIELD" >> "$GITHUB_OUTPUT"
+          if [ -f pnpm-lock.yaml ] || [ -f package-lock.json ] || [ -f yarn.lock ]; then
+            echo "lockfile=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lockfile=false" >> "$GITHUB_OUTPUT"
+          fi
+        elif [ -f pnpm-lock.yaml ]; then
           echo "manager=pnpm" >> "$GITHUB_OUTPUT"
-          echo "lockfile=true" >> "$GITHUB_OUTPUT"
-        elif [ -f package-lock.json ]; then
-          echo "manager=npm" >> "$GITHUB_OUTPUT"
           echo "lockfile=true" >> "$GITHUB_OUTPUT"
         elif [ -f yarn.lock ]; then
           echo "manager=yarn" >> "$GITHUB_OUTPUT"
           echo "lockfile=true" >> "$GITHUB_OUTPUT"
+        elif [ -f package-lock.json ]; then
+          echo "manager=pnpm" >> "$GITHUB_OUTPUT"
+          echo "lockfile=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Ignoring stale package-lock.json; using pnpm (Lovable default)."
         else
           echo "manager=pnpm" >> "$GITHUB_OUTPUT"
           echo "lockfile=false" >> "$GITHUB_OUTPUT"
@@ -126,24 +139,37 @@ runs:
         case "${{ steps.pm.outputs.manager }}" in
           pnpm)
             if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
-              pnpm install --frozen-lockfile
+              pnpm install --frozen-lockfile || {
+                echo "::notice::pnpm lockfile out of sync; falling back to pnpm install."
+                pnpm install
+              }
             else
               pnpm install
             fi
             ;;
           npm)
             if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
-              npm ci
+              npm ci || {
+                echo "::notice::package-lock.json out of sync; falling back to npm install."
+                npm install
+              }
             else
               npm install
             fi
             ;;
           yarn)
             if [ "${{ steps.pm.outputs.lockfile }}" = "true" ]; then
-              yarn install --frozen-lockfile
+              yarn install --frozen-lockfile || {
+                echo "::notice::yarn lockfile out of sync; falling back to yarn install."
+                yarn install
+              }
             else
               yarn install
             fi
+            ;;
+          *)
+            echo "::error::Unsupported package manager: ${{ steps.pm.outputs.manager }}"
+            exit 1
             ;;
         esac
 
