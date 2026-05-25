@@ -257,9 +257,26 @@ runs:
       run: |
         set -euo pipefail
 
-        if ! RESP=$(curl -sf -X POST "https://jbunbxkodmsysnfptqoj.supabase.co/functions/v1/get-instance-url" \
-          -H "Authorization: Bearer $PARKSTATIC_SECRET"); then
-          echo "::error::Failed to resolve Parkstatic deploy URL. Check that parkstatic-secret is valid."
+        if [ -z "$PARKSTATIC_SECRET" ]; then
+          echo "::error::parkstatic-secret is empty. Add PARKSTATIC_SECRET to your repository secrets and pass it to the action."
+          exit 1
+        fi
+
+        RESOLVE_URL="https://jbunbxkodmsysnfptqoj.supabase.co/functions/v1/get-instance-url"
+        RESOLVE_RESPONSE=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$RESOLVE_URL" \
+          -H "Authorization: Bearer $PARKSTATIC_SECRET")
+        RESOLVE_STATUS="${RESOLVE_RESPONSE##*__HTTP_STATUS__:}"
+        RESP="${RESOLVE_RESPONSE%$'\n'__HTTP_STATUS__:*}"
+
+        if [ "$RESOLVE_STATUS" != "200" ]; then
+          echo "::error::Failed to resolve Parkstatic deploy URL (HTTP $RESOLVE_STATUS): $RESP"
+          if echo "$RESP" | grep -q 'Missing/invalid uuid'; then
+            echo "::error::The get-instance-url Supabase function may not be deployed. Run: supabase functions deploy get-instance-url"
+          elif [ "$RESOLVE_STATUS" = "401" ]; then
+            echo "::error::Check that parkstatic-secret matches the token shown in your Parkstatic WordPress admin."
+          elif [ "$RESOLVE_STATUS" = "404" ]; then
+            echo "::error::No Parkstatic instance found for this token. Register the WordPress site first."
+          fi
           exit 1
         fi
 
@@ -267,12 +284,16 @@ runs:
         echo "url=$WEBHOOK_URL" >> "$GITHUB_OUTPUT"
         echo "Resolved deploy URL."
 
-        if ! curl -sf -X POST "$WEBHOOK_URL" \
+        UPLOAD_RESPONSE=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$WEBHOOK_URL" \
           -F "file=@dist.zip;type=application/zip" \
           -F "sha=${GH_SHA}" \
           -F "ref=${GH_REF}" \
-          -F "repository=${GH_REPO}"; then
-          echo "::error::Failed to upload dist.zip to Parkstatic."
+          -F "repository=${GH_REPO}")
+        UPLOAD_STATUS="${UPLOAD_RESPONSE##*__HTTP_STATUS__:}"
+        UPLOAD_BODY="${UPLOAD_RESPONSE%$'\n'__HTTP_STATUS__:*}"
+
+        if [ "$UPLOAD_STATUS" != "200" ]; then
+          echo "::error::Failed to upload dist.zip to Parkstatic (HTTP $UPLOAD_STATUS): $UPLOAD_BODY"
           exit 1
         fi
 
