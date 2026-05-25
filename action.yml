@@ -36,10 +36,27 @@ runs:
       with:
         version: ${{ inputs.pnpm-version }}
 
+    - name: Detect pnpm lockfile
+      id: lockfile
+      shell: bash
+      run: |
+        if [ -f pnpm-lock.yaml ]; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::pnpm-lock.yaml not found; skipping dependency cache and installing without --frozen-lockfile."
+        fi
+
     - uses: actions/setup-node@v5
+      if: steps.lockfile.outputs.exists == 'true'
       with:
         node-version: ${{ inputs.node-version }}
         cache: pnpm
+
+    - uses: actions/setup-node@v5
+      if: steps.lockfile.outputs.exists != 'true'
+      with:
+        node-version: ${{ inputs.node-version }}
 
     - name: Fix TanStack hoisting for Lovable + pnpm
       shell: bash
@@ -47,7 +64,12 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: pnpm install --frozen-lockfile
+      run: |
+        if [ "${{ steps.lockfile.outputs.exists }}" = "true" ]; then
+          pnpm install --frozen-lockfile
+        else
+          pnpm install
+        fi
 
     - name: Write CI Vite config (prerender static site)
       shell: bash
