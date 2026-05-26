@@ -100,3 +100,12 @@ find_output_dir() {
 
   return 1
 }
+
+# True when package.json declares a "build" script. Uses Node so we don't
+# have to grep for a key that could appear inside any other string.
+has_build_script() {
+  node -e '
+    const pkg = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
+    process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1);
+  ' 2>/dev/null
+}

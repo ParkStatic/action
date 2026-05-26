@@ -26,6 +26,26 @@ inputs:
     description: Override the static output directory (skips auto-detection).
     required: false
     default: ""
+  prerender:
+    description: Prerender the SPA to static HTML via headless Chromium.
+    required: false
+    default: "true"
+  prerender-routes:
+    description: Newline-separated extra seed paths the crawler should visit (in case they are not link-discoverable).
+    required: false
+    default: ""
+  prerender-exclude:
+    description: Newline-separated glob patterns of paths to skip (e.g. /admin/**).
+    required: false
+    default: ""
+  prerender-max-pages:
+    description: Safety cap on total prerendered pages.
+    required: false
+    default: "500"
+  prerender-concurrency:
+    description: Number of parallel page workers.
+    required: false
+    default: "4"
   resolve-url:
     description: Parkstatic URL resolver endpoint.
     required: false
@@ -36,9 +56,6 @@ inputs:
     default: "false"
 
 outputs:
-  project-type:
-    description: Detected Lovable project type (tanstack-start or vite-spa).
-    value: ${{ steps.setup.outputs.project-type }}
   output-dir:
     description: Directory that was packaged into dist.zip.
     value: ${{ steps.build.outputs.output-dir }}
@@ -79,10 +96,10 @@ runs:
         DEBUG: ${{ inputs.debug }}
         PACKAGE_MANAGER: ${{ steps.setup.outputs.manager }}
         LOCKFILE: ${{ steps.setup.outputs.lockfile }}
-        PROJECT_TYPE: ${{ steps.setup.outputs.project-type }}
+        PRERENDER_ENABLED: ${{ inputs.prerender }}
       run: bash "$ACTION_PATH/scripts/install.sh"
 
-    - name: Build and package
+    - name: Build
       id: build
       shell: bash
       env:
@@ -91,9 +108,28 @@ runs:
         BUILD_COMMAND: ${{ inputs.build-command }}
         OUTPUT_DIR_OVERRIDE: ${{ inputs.output-dir }}
         PACKAGE_MANAGER: ${{ steps.setup.outputs.manager }}
-        PROJECT_TYPE: ${{ steps.setup.outputs.project-type }}
-        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       run: bash "$ACTION_PATH/scripts/build.sh"
+
+    - name: Prerender
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PRERENDER_ENABLED: ${{ inputs.prerender }}
+        PRERENDER_ROUTES: ${{ inputs.prerender-routes }}
+        PRERENDER_EXCLUDE: ${{ inputs.prerender-exclude }}
+        PRERENDER_MAX_PAGES: ${{ inputs.prerender-max-pages }}
+        PRERENDER_CONCURRENCY: ${{ inputs.prerender-concurrency }}
+        OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
+      run: bash "$ACTION_PATH/scripts/prerender.sh"
+
+    - name: Package
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
+      run: bash "$ACTION_PATH/scripts/package.sh"
 
     - name: Deploy to Parkstatic
       id: deploy
