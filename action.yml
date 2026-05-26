@@ -99,6 +99,17 @@ runs:
         PRERENDER_ENABLED: ${{ inputs.prerender }}
       run: bash "$ACTION_PATH/scripts/install.sh"
 
+    # Many Lovable projects import @tanstack/react-query but omit query-core.
+    # Install it here in CI only — never committed back to the user's repo.
+    - name: Ensure @tanstack/query-core
+      if: steps.setup.outputs.manager == 'pnpm'
+      shell: bash
+      run: |
+        if ! node -e "require.resolve('@tanstack/query-core')" 2>/dev/null; then
+          echo "Installing @tanstack/query-core (missing in many Lovable projects)."
+          pnpm add @tanstack/query-core
+        fi
+
     - name: Build
       id: build
       shell: bash
