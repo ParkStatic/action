@@ -30,6 +30,17 @@ jobs:
 
 Pin to a specific release tag (for example `v1.0.0`) for reproducible builds.
 
+## Hosting requirements
+
+The deployed Lovable SPA expects to be served from the **root** of its domain (e.g. `https://customer.com/`). The Parkstatic action and WP plugin handle this case fully — all asset and HTML routing works automatically.
+
+If the WordPress install lives at a subdirectory (`https://example.com/landing/`), the SPA's bundled React Router will not match the current URL because the SPA's source assumed `basename="/"`. Two workarounds:
+
+- Run WordPress (and Parkstatic) at the root of your domain. Recommended.
+- In your Lovable project, set Vite's `base` and your router's `basename` to the WordPress subdirectory path before deploying.
+
+Static asset serving works on both root and subdirectory installs.
+
 ## How it works
 
 1. Detects the package manager from your lockfile.

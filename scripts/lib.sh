@@ -71,12 +71,25 @@ install_deps() {
 }
 
 # Sets HTTP_BODY and HTTP_STATUS. Remaining args are passed to curl before the URL.
+# Retries once with HTTP/1.1 when curl hits HTTP/2 PROTOCOL_ERROR (exit 92).
 http_post() {
   local url="$1"
   shift
   local response
+  local curl_status=0
 
-  response=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$@" "$url")
+  response=$(curl -sS -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$@" "$url") || curl_status=$?
+
+  if [ "$curl_status" -eq 92 ]; then
+    action_notice "HTTP/2 PROTOCOL_ERROR; retrying POST with HTTP/1.1."
+    curl_status=0
+    response=$(curl -sS --http1.1 -w "\n__HTTP_STATUS__:%{http_code}" -X POST "$@" "$url") || curl_status=$?
+  fi
+
+  if [ "$curl_status" -ne 0 ]; then
+    action_error "curl failed with exit code $curl_status"
+    return "$curl_status"
+  fi
 
   HTTP_STATUS="${response##*__HTTP_STATUS__:}"
   HTTP_BODY="${response%$'\n'__HTTP_STATUS__:*}"
