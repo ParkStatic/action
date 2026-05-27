@@ -26,4 +26,13 @@ fi
 echo "Zipping $OUTPUT_DIR -> $ZIP_PATH"
 (cd "$OUTPUT_DIR" && zip -qr "$ZIP_PATH" .)
 
+# Surface the resulting size so the deploy step's HTTP errors are easier to
+# diagnose. WordPress's default upload_max_filesize is 2M on many shared hosts;
+# anything above that risks a silent `$_FILES` drop that the WP plugin then
+# reports as "parkstatic_missing_file".
+ZIP_BYTES=$(wc -c < "$ZIP_PATH" | tr -d ' ')
+ZIP_HUMAN=$(awk -v b="$ZIP_BYTES" 'BEGIN { split("B KB MB GB", u); s=1; while (b>=1024 && s<4) { b/=1024; s++ } printf "%.2f %s", b, u[s] }')
+echo "Archive size: $ZIP_HUMAN ($ZIP_BYTES bytes)"
+write_output "archive-bytes" "$ZIP_BYTES"
+
 action_endgroup
