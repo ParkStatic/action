@@ -8,6 +8,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "miniflare": "^4.20260526.0",
     "playwright": "1.60.0"
   }
 }

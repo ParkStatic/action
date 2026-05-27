@@ -114,6 +114,37 @@ find_output_dir() {
   return 1
 }
 
+# True when the build emitted a Cloudflare Worker (TanStack Start CF preset
+# and any future Lovable variant that targets the same shape). Echoes the
+# absolute-from-cwd path to the worker entry on success.
+find_ssr_bundle() {
+  if [ -f dist/server/index.js ] && [ -f dist/server/wrangler.json ]; then
+    echo "dist/server/index.js"
+    return 0
+  fi
+  return 1
+}
+
+# Static assets directory the SSR worker is configured to serve from. Reads
+# `assets.directory` out of dist/server/wrangler.json (resolved relative to
+# that file) and falls back to dist/client — the default the CF preset emits.
+find_ssr_assets_dir() {
+  node -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    let dir = "../client";
+    try {
+      const cfg = JSON.parse(fs.readFileSync("dist/server/wrangler.json", "utf8"));
+      if (cfg && cfg.assets && typeof cfg.assets.directory === "string") {
+        dir = cfg.assets.directory;
+      }
+    } catch {}
+    const resolved = path.resolve("dist/server", dir);
+    const rel = path.relative(process.cwd(), resolved);
+    process.stdout.write(rel || ".");
+  '
+}
+
 # True when package.json declares a "build" script. Uses Node so we don't
 # have to grep for a key that could appear inside any other string.
 has_build_script() {

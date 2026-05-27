@@ -132,6 +132,8 @@ runs:
         PRERENDER_MAX_PAGES: ${{ inputs.prerender-max-pages }}
         PRERENDER_CONCURRENCY: ${{ inputs.prerender-concurrency }}
         OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
+        BUILD_MODE: ${{ steps.build.outputs.mode }}
+        SSR_ENTRY: ${{ steps.build.outputs.ssr-entry }}
       run: bash "$ACTION_PATH/scripts/prerender.sh"
 
     - name: Package

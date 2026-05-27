@@ -1,14 +1,21 @@
 #!/usr/bin/env node
-// Prerenders a built Vite SPA into static HTML files by running a local
-// static server with SPA fallback and crawling it with a headless browser.
+// Prerenders any Lovable build into static HTML by running a local origin
+// server and crawling it with a headless browser.
 //
-// Treats the build output as a black box: no assumptions about the
-// framework (Vite SPA, TanStack Start client bundle, anything else that
-// outputs an index.html plus assets). One code path for every Lovable
-// variant past, present, and future.
+// Two clearly separated modes, picked from BUILD_MODE:
+//
+//   - "static" (default): the build already emitted index.html plus assets.
+//     We serve OUTPUT_DIR over a tiny Node static server with SPA fallback.
+//     See serve-static.mjs.
+//
+//   - "ssr":              the build emitted a Cloudflare Worker (TanStack
+//     Start CF preset). We boot it locally via Miniflare and crawl that.
+//     See serve-ssr.mjs.
 //
 // Inputs (all via env):
-//   OUTPUT_DIR              required, dir containing index.html
+//   OUTPUT_DIR              required, dir to write rendered HTML into
+//   BUILD_MODE              "static" (default) or "ssr"
+//   SSR_ENTRY               required when BUILD_MODE=ssr, path to worker entry
 //   PRERENDER_ROUTES        optional, newline-separated extra seed paths
 //   PRERENDER_EXCLUDE       optional, newline-separated globs to skip
 //   PRERENDER_MAX_PAGES     optional, safety cap (default 500)
@@ -18,31 +25,11 @@
 //   DEBUG                   optional, "true" enables verbose logging
 
 import { chromium } from "playwright";
-import http from "node:http";
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync, readFileSync } from "node:fs";
-import { extname, join, resolve as resolvePath, dirname } from "node:path";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { join, resolve as resolvePath, dirname } from "node:path";
 
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".mjs": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".map": "application/json; charset=utf-8",
-  ".txt": "text/plain; charset=utf-8",
-  ".xml": "application/xml; charset=utf-8",
-  ".webmanifest": "application/manifest+json; charset=utf-8",
-};
+import { ensureStaticOutput, startStaticServer } from "./serve-static.mjs";
+import { startSsrServer } from "./serve-ssr.mjs";
 
 const config = readConfig();
 const log = makeLogger(config.debug);
@@ -53,17 +40,14 @@ main().catch((err) => {
 });
 
 async function main() {
-  ensureIndexHtml(config.outputDir);
-
-  const server = await startStaticServer(config.outputDir);
-  const origin = `http://127.0.0.1:${server.port}`;
-  log(`Static server listening on ${origin}`);
+  const server = await startServerForMode(config);
+  log(`Origin server (${config.mode}) listening on ${server.origin}`);
 
   const browser = await chromium.launch();
   try {
     const result = await crawl({
       browser,
-      origin,
+      origin: server.origin,
       outputDir: config.outputDir,
       seedPaths: ["/", ...config.seedRoutes, ...readSitemapPaths(config.outputDir)],
       excludeMatchers: config.excludePatterns.map(globToRegExp),
@@ -80,14 +64,40 @@ async function main() {
     await browser.close();
     await server.stop();
   }
+
+  // Final sanity check, independent of mode: the deploy step expects an
+  // index.html at the root of OUTPUT_DIR. Static mode comes with one; SSR
+  // mode has to produce one via the crawl. If neither happened, fail loud.
+  if (!existsSync(join(config.outputDir, "index.html"))) {
+    throw new Error(`Prerender finished but ${config.outputDir}/index.html is missing — nothing to deploy.`);
+  }
+}
+
+// --- mode dispatch ----------------------------------------------------------
+
+async function startServerForMode(cfg) {
+  if (cfg.mode === "ssr") {
+    if (!cfg.ssrEntry) {
+      throw new Error("BUILD_MODE=ssr requires SSR_ENTRY to be set.");
+    }
+    return startSsrServer({ ssrEntry: cfg.ssrEntry, assetsDir: cfg.outputDir });
+  }
+  ensureStaticOutput(cfg.outputDir);
+  return startStaticServer({ outputDir: cfg.outputDir });
 }
 
 // --- config -----------------------------------------------------------------
 
 function readConfig() {
   const outputDir = required("OUTPUT_DIR");
+  const mode = (process.env.BUILD_MODE || "static").toLowerCase();
+  if (mode !== "static" && mode !== "ssr") {
+    throw new Error(`Unknown BUILD_MODE: ${mode} (expected "static" or "ssr")`);
+  }
   return {
+    mode,
     outputDir: resolvePath(outputDir),
+    ssrEntry: process.env.SSR_ENTRY ? resolvePath(process.env.SSR_ENTRY) : null,
     seedRoutes: splitLines(process.env.PRERENDER_ROUTES),
     excludePatterns: splitLines(process.env.PRERENDER_EXCLUDE),
     maxPages: positiveInt(process.env.PRERENDER_MAX_PAGES, 500),
@@ -118,77 +128,6 @@ function makeLogger(debug) {
   return (...args) => {
     if (debug) console.log("[prerender]", ...args);
   };
-}
-
-// --- static server ----------------------------------------------------------
-
-// Tiny static file server. Returns index.html for any URL whose path resolves
-// to a directory or to a missing file with no extension (the classic SPA
-// fallback). This matches what hosting platforms — and the Parkstatic WP
-// plugin — do at serve time, so the crawler sees the same view a real user
-// would.
-function startStaticServer(root) {
-  return new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => handleRequest(root, req, res));
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      resolve({
-        port,
-        stop: () => new Promise((done) => server.close(() => done())),
-      });
-    });
-  });
-}
-
-function handleRequest(root, req, res) {
-  const url = new URL(req.url, "http://internal");
-  const decoded = safeDecode(url.pathname);
-  if (decoded === null) {
-    res.writeHead(400).end("Bad Request");
-    return;
-  }
-
-  const filePath = resolveRequestPath(root, decoded);
-  if (!filePath) {
-    res.writeHead(404).end("Not Found");
-    return;
-  }
-
-  const mime = MIME[extname(filePath).toLowerCase()] || "application/octet-stream";
-  res.writeHead(200, { "content-type": mime });
-  createReadStream(filePath).pipe(res);
-}
-
-function resolveRequestPath(root, pathname) {
-  const cleaned = pathname.replace(/^\/+/, "");
-  const candidate = cleaned === "" ? root : resolvePath(root, cleaned);
-
-  if (!candidate.startsWith(root)) return null;
-
-  if (existsSync(candidate)) {
-    const stat = statSync(candidate);
-    if (stat.isFile()) return candidate;
-    if (stat.isDirectory()) {
-      const index = join(candidate, "index.html");
-      if (existsSync(index)) return index;
-    }
-  }
-
-  // SPA fallback: paths without an extension fall back to root index.html.
-  if (!extname(pathname)) {
-    const index = join(root, "index.html");
-    if (existsSync(index)) return index;
-  }
-  return null;
-}
-
-function safeDecode(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return null;
-  }
 }
 
 // --- crawler ----------------------------------------------------------------
@@ -331,13 +270,6 @@ function normalizePath(input) {
 }
 
 // --- helpers ----------------------------------------------------------------
-
-function ensureIndexHtml(outputDir) {
-  const index = join(outputDir, "index.html");
-  if (!existsSync(index)) {
-    throw new Error(`No index.html found in ${outputDir}. Did the build succeed?`);
-  }
-}
 
 // Pulls extra seed routes out of sitemap.xml if the build emitted one.
 // Best-effort and tolerant: regex over <loc>...</loc>, ignore malformed files.
