@@ -46,6 +46,23 @@ inputs:
     description: Number of parallel page workers.
     required: false
     default: "4"
+  disable-hydration:
+    description: |
+      When "true", strips the framework's `<script type="module">` entry
+      point from each prerendered page so client-side React / TanStack
+      Router never boots in the visitor's browser. Use this when hydration
+      crashes turn the page blank shortly after load (typical for SSR
+      builds, including TanStack Start). The SSR'd DOM stays exactly as
+      captured: text, images, CSS animations, videos, iframes, native
+      HTML5 forms, and external third-party scripts all keep working;
+      React-driven interactivity (modals, Framer Motion, client-side
+      routing) does not.
+
+      Left empty (the default), the action picks per build mode: "true"
+      for SSR builds, "false" for plain Vite SPA builds. Set to "true" or
+      "false" explicitly to override.
+    required: false
+    default: ""
   deploy-url:
     description: Parkstatic deploy endpoint (Supabase Edge Function). The action uploads dist.zip to this URL; the function parks the artifact in private storage and calls your WordPress site to pull it.
     required: false
@@ -131,6 +148,7 @@ runs:
         PRERENDER_EXCLUDE: ${{ inputs.prerender-exclude }}
         PRERENDER_MAX_PAGES: ${{ inputs.prerender-max-pages }}
         PRERENDER_CONCURRENCY: ${{ inputs.prerender-concurrency }}
+        DISABLE_HYDRATION: ${{ inputs.disable-hydration }}
         OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
         BUILD_MODE: ${{ steps.build.outputs.mode }}
         SSR_ENTRY: ${{ steps.build.outputs.ssr-entry }}

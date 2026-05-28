@@ -55,6 +55,7 @@ async function main() {
       pageTimeoutMs: config.pageTimeoutMs,
       waitUntil: config.waitUntil,
       concurrency: config.concurrency,
+      disableHydration: config.disableHydration,
     });
     console.log(`Prerendered ${result.rendered} page(s); skipped ${result.skipped}; failed ${result.failed}.`);
     if (result.failed > 0) {
@@ -104,6 +105,7 @@ function readConfig() {
     pageTimeoutMs: positiveInt(process.env.PRERENDER_PAGE_TIMEOUT, 15000),
     waitUntil: process.env.PRERENDER_WAIT || "networkidle",
     concurrency: positiveInt(process.env.PRERENDER_CONCURRENCY, 4),
+    disableHydration: process.env.DISABLE_HYDRATION === "true",
     debug: process.env.DEBUG === "true",
   };
 }
@@ -142,6 +144,7 @@ async function crawl({
   pageTimeoutMs,
   waitUntil,
   concurrency,
+  disableHydration,
 }) {
   const queue = [];
   const seen = new Set();
@@ -175,7 +178,8 @@ async function crawl({
             counters.skipped++;
             continue;
           }
-          writeStaticPage(outputDir, path, html);
+          const finalHtml = disableHydration ? neutralizeHydration(html) : html;
+          writeStaticPage(outputDir, path, finalHtml);
           counters.rendered++;
           log(`Rendered ${path} (+${discovered.length} link(s))`);
           for (const next of discovered) enqueue(next);
@@ -242,6 +246,48 @@ function collectInternalLinks(hrefs, origin, currentPath) {
 }
 
 // --- output -----------------------------------------------------------------
+
+// Strips locally-hosted `<script type="module">` tags from the rendered HTML
+// so the framework's hydration entry never runs in the visitor's browser.
+//
+// Why we need this: Playwright's `page.content()` returns a DOM snapshot
+// that has already been hydrated by the headless browser. Reloading that
+// snapshot in a real browser kicks the framework into a *second* hydration
+// pass against state that no longer exists; TanStack Router (and similar
+// SSR-only setups) trip a `tiny-invariant` assertion and React unmounts
+// the whole tree, leaving a blank page.
+//
+// Killing the entry script keeps the SSR'd DOM exactly as captured: text,
+// images, CSS animations, videos, iframes, native forms, hover effects,
+// and any third-party (external `src`) scripts all still work. The cost
+// is React-driven interactivity — modals, client-side routing, Framer
+// Motion, Lottie, etc. That trade-off is the deal Parkstatic users sign
+// up for; the input `disable-hydration: false` opts back in.
+//
+// Heuristics:
+//   - Only `<script type="module">` is targeted. Vite-style builds put
+//     their entry there; classic `<script>` tags (analytics, third-party
+//     widgets) are left alone.
+//   - Module scripts with an `src` starting with `http://` or `https://`
+//     are preserved — these are almost always external libraries the user
+//     added, not the framework's own entry.
+//   - Inline `<script type="module">` blocks are removed; Vite occasionally
+//     emits inline hydration glue.
+//   - `<link rel="modulepreload">` tags are left in place. They never
+//     execute on their own; they just waste a bit of bandwidth preloading
+//     chunks that will never run.
+function neutralizeHydration(html) {
+  return html.replace(
+    /<script\b([^>]*\btype\s*=\s*["']?module["']?[^>]*)>([\s\S]*?)<\/script>/gi,
+    (match, attrs) => {
+      const srcMatch = attrs.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+      if (srcMatch && /^https?:\/\//i.test(srcMatch[1])) {
+        return match;
+      }
+      return "";
+    },
+  );
+}
 
 // Writes the rendered DOM to OUTPUT_DIR. The root path overwrites
 // OUTPUT_DIR/index.html; nested paths become OUTPUT_DIR/<path>/index.html so

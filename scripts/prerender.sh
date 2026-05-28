@@ -31,6 +31,21 @@ else
   echo "Prerendering ${OUTPUT_DIR} via headless Chromium."
 fi
 
+# Mode-aware default for hydration stripping. SSR builds (TanStack Start
+# et al.) reliably crash on re-hydration of prerendered HTML, so we strip
+# the framework's module entry by default. Plain Vite SPAs re-hydrate
+# cleanly, so we leave them alone. Either default can be overridden via
+# the `disable-hydration` input.
+if [ -z "${DISABLE_HYDRATION:-}" ]; then
+  if [ "${BUILD_MODE:-static}" = "ssr" ]; then
+    DISABLE_HYDRATION="true"
+  else
+    DISABLE_HYDRATION="false"
+  fi
+fi
+export DISABLE_HYDRATION
+echo "Hydration scripts in prerendered HTML: $([ "$DISABLE_HYDRATION" = "true" ] && echo "stripped (static-only mode)" || echo "preserved (interactive React kept)")."
+
 node "$ACTION_PATH/scripts/prerender.mjs"
 
 action_endgroup
