@@ -273,20 +273,36 @@ function collectInternalLinks(hrefs, origin, currentPath) {
 //     added, not the framework's own entry.
 //   - Inline `<script type="module">` blocks are removed; Vite occasionally
 //     emits inline hydration glue.
-//   - `<link rel="modulepreload">` tags are left in place. They never
-//     execute on their own; they just waste a bit of bandwidth preloading
-//     chunks that will never run.
+//   - `<link rel="modulepreload">` tags are also removed. Without the
+//     hydration entry there is nothing to import these chunks, and on a
+//     slow shared host every preload is a full request that ties up a
+//     connection slot during the critical render window — which can be
+//     enough on its own to time out Lighthouse / PageSpeed Insights runs.
+//     Same-origin only: cross-origin preloads (rare, but valid for users
+//     hosting chunks on a CDN) are preserved on the assumption that the
+//     user wired them up deliberately.
 function neutralizeHydration(html) {
-  return html.replace(
-    /<script\b([^>]*\btype\s*=\s*["']?module["']?[^>]*)>([\s\S]*?)<\/script>/gi,
-    (match, attrs) => {
-      const srcMatch = attrs.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
-      if (srcMatch && /^https?:\/\//i.test(srcMatch[1])) {
-        return match;
-      }
-      return "";
-    },
-  );
+  return html
+    .replace(
+      /<script\b([^>]*\btype\s*=\s*["']?module["']?[^>]*)>([\s\S]*?)<\/script>/gi,
+      (match, attrs) => {
+        const srcMatch = attrs.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
+        if (srcMatch && /^https?:\/\//i.test(srcMatch[1])) {
+          return match;
+        }
+        return "";
+      },
+    )
+    .replace(
+      /<link\b([^>]*\brel\s*=\s*["']?modulepreload["']?[^>]*)\/?>/gi,
+      (match, attrs) => {
+        const hrefMatch = attrs.match(/\bhref\s*=\s*["']([^"']+)["']/i);
+        if (hrefMatch && /^https?:\/\//i.test(hrefMatch[1])) {
+          return match;
+        }
+        return "";
+      },
+    );
 }
 
 // Writes the rendered DOM to OUTPUT_DIR. The root path overwrites
