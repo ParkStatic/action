@@ -9,51 +9,71 @@ if [ -z "${PARKSTATIC_SECRET:-}" ]; then
   exit 1
 fi
 
-http_post "$RESOLVE_URL" -H "Authorization: Bearer $PARKSTATIC_SECRET"
-
-if [ "$HTTP_STATUS" != "200" ]; then
-  action_error "Failed to resolve Parkstatic deploy URL (HTTP $HTTP_STATUS): $HTTP_BODY"
-  if echo "$HTTP_BODY" | grep -q 'Missing/invalid authorization'; then
-    action_error "The get-instance-url Supabase function may not be deployed. Run: supabase functions deploy get-instance-url"
-  elif [ "$HTTP_STATUS" = "401" ]; then
-    action_error "Check that parkstatic-secret matches the token shown in your Parkstatic WordPress admin."
-  elif [ "$HTTP_STATUS" = "404" ]; then
-    action_error "No Parkstatic instance found for this token. Register the WordPress site first."
-  fi
+if [ -z "${DEPLOY_URL:-}" ]; then
+  action_error "deploy-url is empty."
   exit 1
 fi
 
-WEBHOOK_URL=$(echo "$HTTP_BODY" | jq -er '.url')
-write_output "url" "$WEBHOOK_URL"
-echo "Resolved deploy URL."
-echo "WEBHOOK_URL: $WEBHOOK_URL"
+if [ ! -f dist.zip ]; then
+  action_error "dist.zip not found at the workspace root. The Package step must run before Deploy."
+  exit 1
+fi
 
-http_post "$WEBHOOK_URL" \
+ZIP_BYTES=$(wc -c < dist.zip | tr -d ' ')
+echo "Uploading dist.zip ($ZIP_BYTES bytes) to Parkstatic."
+echo "DEPLOY_URL: $DEPLOY_URL"
+
+# The deploy function does the work in two phases:
+#
+#   1. Foreground (what we wait for): authenticate, upload to private
+#      storage, sign a 3-day download URL.
+#   2. Background (what we DO NOT wait for): call the WordPress receiver
+#      with the signed URL, clean up the artifact on success.
+#
+# A 2xx here means phase 1 succeeded — the artifact is in storage and WP
+# will pull it within seconds. Non-2xx means phase 1 failed (auth, storage,
+# config). Phase 2 failures show up on the user's WordPress site, not here.
+http_post "$DEPLOY_URL" \
   -H "Authorization: Bearer $PARKSTATIC_SECRET" \
-  -F "file=@dist.zip;type=application/zip" \
-  -F "sha=${GH_SHA}" \
-  -F "ref=${GH_REF}" \
-  -F "repository=${GH_REPO}"
+  -H "Content-Type: application/zip" \
+  -H "X-Parkstatic-Sha: ${GH_SHA}" \
+  -H "X-Parkstatic-Ref: ${GH_REF}" \
+  -H "X-Parkstatic-Repository: ${GH_REPO}" \
+  --data-binary "@dist.zip"
 
-if [ "$HTTP_STATUS" != "200" ]; then
-  action_error "Failed to upload dist.zip to Parkstatic (HTTP $HTTP_STATUS): $HTTP_BODY"
-  # `parkstatic_missing_file` from a successfully-routed request almost always
-  # means PHP silently dropped the upload because it exceeded server limits.
-  # In that case $_FILES is empty and the plugin reports "missing file" even
-  # though curl posted it. Point the user at the right knobs.
-  if [ "$HTTP_STATUS" = "400" ] && echo "$HTTP_BODY" | grep -q 'parkstatic_missing_file'; then
-    ZIP_BYTES=$(wc -c < dist.zip 2>/dev/null | tr -d ' ' || true)
-    action_error "The Parkstatic server received the request but PHP found no uploaded file."
-    action_error "This almost always means the archive exceeded the host's PHP upload limits."
-    if [ -n "$ZIP_BYTES" ] && [ "$ZIP_BYTES" -gt 0 ]; then
-      action_error "Archive size: $ZIP_BYTES bytes ($(awk -v b="$ZIP_BYTES" 'BEGIN { split("B KB MB GB", u); s=1; while (b>=1024 && s<4) { b/=1024; s++ } printf "%.2f %s", b, u[s] }'))."
-    fi
-    action_error "Raise upload_max_filesize and post_max_size in php.ini (and client_max_body_size on nginx) on the WordPress host running parkstatic.site so they comfortably exceed the archive size, then re-run."
+# Treat any 2xx as success — the function returns 202 Accepted to signal
+# the async hand-off.
+if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+  action_error "Deploy failed (HTTP $HTTP_STATUS): $HTTP_BODY"
+
+  if [ "$HTTP_STATUS" = "401" ]; then
+    action_error "parkstatic-secret did not match any registered Parkstatic instance. Copy the token from your WordPress admin (Settings → Parkstatic) and update the PARKSTATIC_SECRET repo secret."
+  elif [ "$HTTP_STATUS" = "404" ]; then
+    action_error "No Parkstatic instance is registered for this token. Open Settings → Parkstatic on your WordPress site and click 'Start Parkstatic' first."
+  elif [ "$HTTP_STATUS" = "400" ]; then
+    action_error "Parkstatic rejected the upload as malformed. This usually means the action was modified or hit a Supabase outage. Re-run the workflow; if it persists, open an issue with the response body above."
+  elif [ "$HTTP_STATUS" -ge 500 ]; then
+    action_error "Parkstatic's storage or signing layer returned an error. This is almost always transient — re-run the workflow."
   fi
+
   exit 1
 fi
 
-echo "Posted dist.zip to deploy webhook."
+# Pull deploy_id out of the JSON body if jq is available; falls back to a
+# best-effort sed so we still surface something useful on minimal runners.
+DEPLOY_ID=$(echo "$HTTP_BODY" | jq -r '.deploy_id // empty' 2>/dev/null \
+  || echo "$HTTP_BODY" | sed -n 's/.*"deploy_id":"\([^"]*\)".*/\1/p')
+
+echo "Artifact uploaded to Parkstatic."
+if [ -n "$DEPLOY_ID" ]; then
+  echo "Deploy ID: $DEPLOY_ID"
+fi
+echo "Your WordPress site is downloading and installing the new build in the background."
+echo "Check the site or its Parkstatic admin page within a minute to confirm."
+
 write_output "deployed" "true"
+if [ -n "$DEPLOY_ID" ]; then
+  write_output "deploy-id" "$DEPLOY_ID"
+fi
 
 action_endgroup
