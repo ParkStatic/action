@@ -1,0 +1,208 @@
+name: Parkstatic Build and Deploy
+description: Deploy your website to WordPress — automatically
+author: ParkStatic
+
+branding:
+  icon: upload-cloud
+  color: green
+
+inputs:
+  parkstatic-secret:
+    description: Parkstatic instance secret token (store as a repository secret).
+    required: true
+  node-version:
+    description: Node.js version used for the build.
+    required: false
+    default: "22"
+  pnpm-version:
+    description: pnpm version used for the build.
+    required: false
+    default: "10"
+  build-command:
+    description: Override the build command (skips auto-detection).
+    required: false
+    default: ""
+  output-dir:
+    description: Override the static output directory (skips auto-detection).
+    required: false
+    default: ""
+  prerender:
+    description: |
+      Prerender the SPA to static HTML via headless Chromium. Builds that
+      already emit the framework's own prerendered HTML with an inline
+      hydration bootstrap (e.g. TanStack Start's Vite `prerender`) are detected
+      automatically and deployed verbatim — the crawl is skipped for them
+      regardless of this input, since re-capturing their post-hydration DOM
+      would strip the bootstrap and blank the page.
+    required: false
+    default: "true"
+  prerender-routes:
+    description: Newline-separated extra seed paths the crawler should visit (in case they are not link-discoverable).
+    required: false
+    default: ""
+  prerender-exclude:
+    description: Newline-separated glob patterns of paths to skip (e.g. /admin/**).
+    required: false
+    default: ""
+  prerender-max-pages:
+    description: Safety cap on total prerendered pages.
+    required: false
+    default: "500"
+  prerender-concurrency:
+    description: Number of parallel page workers.
+    required: false
+    default: "4"
+  disable-hydration:
+    description: |
+      Escape hatch that strips the framework's `<script type="module">`
+      entry point from each prerendered page, so client-side React /
+      TanStack Router never boots in the visitor's browser. The captured
+      DOM stays exactly as rendered: text, images, CSS animations, videos,
+      iframes, native HTML5 forms, and external third-party scripts all
+      keep working; React-driven interactivity (modals, Framer Motion,
+      client-side routing) does not.
+
+      Left empty (the default), hydration is KEPT for every build shape.
+      SSR builds capture the raw server response (which carries the
+      framework's serialized hydration state), so the page hydrates
+      cleanly into a fully interactive SPA; Vite SPA builds re-mount over
+      the captured DOM. Set to "true" only as a fallback if a specific
+      build still crashes on hydration (blank page shortly after load).
+    required: false
+    default: ""
+  plan-url:
+    description: Parkstatic plan endpoint (Supabase Edge Function). The action sends a fingerprint of the repo (package.json + lockfile names) and receives a declarative build plan. If unreachable, the action falls back to local detection.
+    required: false
+    default: "https://jbunbxkodmsysnfptqoj.supabase.co/functions/v1/plan"
+  deploy-url:
+    description: Parkstatic deploy endpoint (Supabase Edge Function). The action uploads dist.zip to this URL; the function parks the artifact in private storage and calls your WordPress site to pull it.
+    required: false
+    default: "https://jbunbxkodmsysnfptqoj.supabase.co/functions/v1/deploy"
+  debug:
+    description: Enable verbose shell and HTTP logging.
+    required: false
+    default: "false"
+
+outputs:
+  output-dir:
+    description: Directory that was packaged into dist.zip.
+    value: ${{ steps.build.outputs.output-dir }}
+  deployed:
+    description: Whether dist.zip was uploaded to the Parkstatic deploy endpoint.
+    value: ${{ steps.deploy.outputs.deployed }}
+  deploy-id:
+    description: Server-side UUID for this deploy artifact, useful for log correlation. The WordPress receiver is notified in the background after the action exits, so this ID identifies the artifact in Supabase Storage rather than the final WP install status.
+    value: ${{ steps.deploy.outputs.deploy-id }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v5
+
+    - name: Detect project
+      id: setup
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+      run: bash "$ACTION_PATH/scripts/detect.sh"
+
+    - uses: pnpm/action-setup@v4
+      if: steps.setup.outputs.manager == 'pnpm'
+      with:
+        version: ${{ inputs.pnpm-version }}
+
+    - uses: actions/setup-node@v5
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: ${{ steps.setup.outputs.cache }}
+
+    # Fetch the declarative build plan (which build deps to allow/inject, how to
+    # build, whether to prerender). Falls back to local detection if the plan
+    # endpoint is unreachable. Runs after setup-node so Node's global fetch is
+    # available; tool selection (package manager, cache) stays in the local
+    # detect step above.
+    - name: Resolve build plan
+      id: plan
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PARKSTATIC_SECRET: ${{ inputs.parkstatic-secret }}
+        PLAN_URL: ${{ inputs.plan-url }}
+        PRERENDER_INPUT: ${{ inputs.prerender }}
+      run: bash "$ACTION_PATH/scripts/plan.sh"
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PACKAGE_MANAGER: ${{ steps.setup.outputs.manager }}
+        LOCKFILE: ${{ steps.setup.outputs.lockfile }}
+        BUILT_DEPS: ${{ steps.plan.outputs.built-deps }}
+        PRERENDER_ENABLED: ${{ steps.plan.outputs.prerender-enabled }}
+      run: bash "$ACTION_PATH/scripts/install.sh"
+
+    # Build-time scaffolding the plan asked for (e.g. @tanstack/query-core for
+    # projects that import react-query but omit it). Installed in CI only,
+    # only when missing — never committed back to the user's repo.
+    - name: Inject build dependencies
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PACKAGE_MANAGER: ${{ steps.setup.outputs.manager }}
+        INJECT_DEPS: ${{ steps.plan.outputs.inject-deps }}
+      run: bash "$ACTION_PATH/scripts/inject.sh"
+
+    - name: Build
+      id: build
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        BUILD_KIND: ${{ steps.plan.outputs.build-kind }}
+        BUILD_SCRIPT: ${{ steps.plan.outputs.build-script }}
+        OUTPUT_DIR_OVERRIDE: ${{ inputs.output-dir }}
+        PACKAGE_MANAGER: ${{ steps.setup.outputs.manager }}
+      run: bash "$ACTION_PATH/scripts/build.sh"
+
+    - name: Prerender
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PRERENDER_ENABLED: ${{ steps.plan.outputs.prerender-enabled }}
+        PRERENDER_ROUTES: ${{ inputs.prerender-routes }}
+        PRERENDER_EXCLUDE: ${{ inputs.prerender-exclude }}
+        PRERENDER_MAX_PAGES: ${{ inputs.prerender-max-pages }}
+        PRERENDER_CONCURRENCY: ${{ inputs.prerender-concurrency }}
+        DISABLE_HYDRATION: ${{ inputs.disable-hydration }}
+        OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
+        BUILD_MODE: ${{ steps.build.outputs.mode }}
+        SSR_ENTRY: ${{ steps.build.outputs.ssr-entry }}
+        SSR_RUNTIME: ${{ steps.build.outputs.ssr-runtime }}
+      run: bash "$ACTION_PATH/scripts/prerender.sh"
+
+    - name: Package
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        OUTPUT_DIR: ${{ steps.build.outputs.output-dir }}
+      run: bash "$ACTION_PATH/scripts/package.sh"
+
+    - name: Deploy to Parkstatic
+      id: deploy
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        DEBUG: ${{ inputs.debug }}
+        PARKSTATIC_SECRET: ${{ inputs.parkstatic-secret }}
+        DEPLOY_URL: ${{ inputs.deploy-url }}
+        GH_SHA: ${{ github.sha }}
+        GH_REF: ${{ github.ref }}
+        GH_REPO: ${{ github.repository }}
+      run: bash "$ACTION_PATH/scripts/deploy.sh"

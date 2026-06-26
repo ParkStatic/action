@@ -1,0 +1,14 @@
+{
+  "name": "parkstatic-action",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Internal dependencies for the Parkstatic GitHub Action. Not published.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "miniflare": "^4.20260526.0",
+    "playwright": "1.60.0"
+  }
+}
