@@ -107,7 +107,7 @@ outputs:
     description: Whether dist.zip was uploaded to the Parkstatic deploy endpoint.
     value: ${{ steps.deploy.outputs.deployed }}
   deploy-id:
-    description: Server-side UUID for this deploy artifact, useful for log correlation. The WordPress receiver is notified in the background after the action exits, so this ID identifies the artifact in Supabase Storage rather than the final WP install status.
+    description: Server-side UUID for this deploy artifact, useful for log correlation. The action waits for WordPress to confirm the install before exiting, so this ID corresponds to a completed (or failed) WP-side deploy.
     value: ${{ steps.deploy.outputs.deploy-id }}
 
 runs:

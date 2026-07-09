@@ -43,12 +43,16 @@ echo "DEPLOY_URL: $DEPLOY_URL"
 #
 #   1. Foreground (what we wait for): authenticate, upload to private
 #      storage, sign a 3-day download URL.
-#   2. Background (what we DO NOT wait for): call the WordPress receiver
-#      with the signed URL, clean up the artifact on success.
+#   2. WordPress hand-off: call the site's WP receiver with the signed URL
+#      so it can pull and extract the build. We send `X-Parkstatic-Wait` so
+#      the function waits for this phase instead of deferring it — that way
+#      a WP-side failure (e.g. Cloudflare 522 origin down, receiver 5xx,
+#      install error) surfaces here and fails the run, instead of the action
+#      going green while the site never updates. The wait is bounded by the
+#      receiver's own 120s timeout, so a fast 522 returns in seconds.
 #
-# A 2xx here means phase 1 succeeded — the artifact is in storage and WP
-# will pull it within seconds. Non-2xx means phase 1 failed (auth, storage,
-# config). Phase 2 failures show up on the user's WordPress site, not here.
+# Non-2xx means phase 1 failed (auth, storage, config) or — for 502 — phase
+# 2 failed on the WordPress side; the message body carries the details.
 #
 # GitHub already masks registered secrets in logs, but `set -x` (debug mode)
 # would otherwise echo the expanded Authorization header. Suspend xtrace for
@@ -62,11 +66,13 @@ http_post "$DEPLOY_URL" \
   -H "X-Parkstatic-Sha: ${GH_SHA}" \
   -H "X-Parkstatic-Ref: ${GH_REF}" \
   -H "X-Parkstatic-Repository: ${GH_REPO}" \
+  -H "X-Parkstatic-Wait: true" \
   --data-binary "@dist.zip"
 [ "$parkstatic_xtrace" -eq 1 ] && set -x
 
-# Treat any 2xx as success — the function returns 202 Accepted to signal
-# the async hand-off.
+# The function returns 200 when WP confirmed the install (foreground wait),
+# 502 when WordPress rejected/failed the deploy, and other non-2xx for
+# phase-1 failures (auth, storage, config).
 if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
   action_error "Deploy failed (HTTP $HTTP_STATUS): $HTTP_BODY"
 
@@ -78,6 +84,25 @@ if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
     action_error "This Parkstatic site does not have an active paid license. Activate or renew your license in WordPress admin (Parkstatic → Account) and try again."
   elif [ "$HTTP_STATUS" = "400" ]; then
     action_error "Parkstatic rejected the upload as malformed. This usually means the action was modified or hit a Supabase outage. Re-run the workflow; if it persists, open an issue with the response body above."
+  elif [ "$HTTP_STATUS" = "502" ]; then
+    # WordPress side rejected the deploy. Pull the WP status code out of the
+    # JSON body (if present) and append a known-issue hint for the common
+    # Cloudflare origin/timeout codes; for anything else, the raw receiver
+    # error in the body is the best pointer we have.
+    WP_STATUS=$(echo "$HTTP_BODY" | jq -r '.wp_status // empty' 2>/dev/null \
+      || echo "$HTTP_BODY" | sed -n 's/.*"wp_status":\([0-9]*\).*/\1/p')
+    action_error "WordPress rejected the deploy${WP_STATUS:+ (WP HTTP $WP_STATUS)}. See the response body above for the receiver's error."
+    case "$WP_STATUS" in
+      522|523|524)
+        action_error "Known issue: WP HTTP $WP_STATUS is a Cloudflare origin error (522 connection timed out, 523 origin unreachable, 524 timeout). The WordPress server is not completing requests — check that PHP/WP-FPM is up and not resource-starved, then re-run the workflow."
+        ;;
+      0)
+        action_error "Known issue: WP status 0 means the receiver did not respond within the 120s timeout. Check that WordPress is reachable and not down/sleeping, then re-run the workflow."
+        ;;
+      *)
+        action_error "This is not a common Parkstatic deploy error. If it persists, open an issue with the response body above."
+        ;;
+    esac
   elif [ "$HTTP_STATUS" -ge 500 ]; then
     action_error "Parkstatic's storage or signing layer returned an error. This is almost always transient — re-run the workflow."
   fi
@@ -94,8 +119,7 @@ echo "Artifact uploaded to Parkstatic."
 if [ -n "$DEPLOY_ID" ]; then
   echo "Deploy ID: $DEPLOY_ID"
 fi
-echo "Your WordPress site is downloading and installing the new build in the background."
-echo "Check the site or its Parkstatic admin page within a minute to confirm."
+echo "WordPress confirmed the deploy: the new build has been pulled and installed."
 
 write_output "deployed" "true"
 if [ -n "$DEPLOY_ID" ]; then

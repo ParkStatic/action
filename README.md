@@ -55,8 +55,9 @@ Static assets work on both root and subdirectory installs.
 
 The action checks out your repo, installs dependencies, runs your project's
 `build` script, prepares a static site suitable for WordPress hosting, and
-uploads it to your Parkstatic instance. Your WordPress site picks up the new
-build shortly after the workflow finishes.
+uploads it to your Parkstatic instance. The action waits for WordPress to
+confirm the install before finishing, so a failed deploy (e.g. the WordPress
+server being unreachable) fails the workflow run instead of going green.
 
 The action never modifies your repository — no commits, branches, or PRs.
 

@@ -12,8 +12,8 @@ fi
 # Pin the zip to the workspace root via an absolute path. Using `../dist.zip`
 # from inside $OUTPUT_DIR only lands at the workspace root when OUTPUT_DIR is
 # exactly one level deep (e.g. `dist`); for `dist/client` it would land in
-# `dist/dist.zip` and the deploy step's `-F "file=@dist.zip"` would fail with
-# curl exit 26 (cannot read local file).
+# `dist/dist.zip` and the deploy step's `--data-binary "@dist.zip"` would fail
+# with curl exit 26 (cannot read local file).
 ZIP_PATH="$(pwd)/dist.zip"
 rm -f "$ZIP_PATH"
 
